@@ -36,7 +36,9 @@ to work, but configuring both gives you real failover.
 
 1. Get a free API key at https://aistudio.google.com/apikey.
 2. Set `GEMINI_API_KEY` in `.env.local`.
-3. `GEMINI_MODEL` defaults to `gemini-2.0-flash` if unset. Check
+3. `GEMINI_MODEL` defaults to `gemini-2.5-flash` if unset (current as of
+   Sept 2026 — `gemini-2.0-flash`, this project's original default, was
+   shut down June 1, 2026 and now errors). Check
    https://ai.google.dev/gemini-api/docs/pricing for the current free-tier
    model list before going live — Google renames/retires these over time,
    and this app only ever calls exactly the model you configure.
@@ -45,11 +47,17 @@ to work, but configuring both gives you real failover.
 
 1. Get a free API key at https://openrouter.ai/keys.
 2. Set `OPENROUTER_API_KEY` in `.env.local`.
-3. `OPENROUTER_MODEL` defaults to `meta-llama/llama-3.3-70b-instruct:free`.
-   Browse the current free roster at
-   https://openrouter.ai/models?max_price=0 — **the model you set must end
-   in `:free`**, or the app refuses to call it (cost protection — see
-   ARCHITECTURE.md §11). Only set `OPENROUTER_ALLOW_PAID_MODEL=true` if you
+3. `OPENROUTER_MODEL` defaults to `openrouter/free`, OpenRouter's own
+   self-updating Free Models Router — it always resolves to *some*
+   currently-free model with no manual upkeep, which matters because
+   OpenRouter's individually-named free models have rotated away entirely
+   before (the original default here, `meta-llama/llama-3.3-70b-instruct:free`,
+   stopped being free in August 2026). If you'd rather pin one specific
+   model, browse the current free roster at
+   https://openrouter.ai/models?max_price=0 — **the model you set must be
+   `openrouter/free` or end in `:free`**, or the app refuses to call it
+   (cost protection — see ARCHITECTURE.md §11). Only set
+   `OPENROUTER_ALLOW_PAID_MODEL=true` if you
    deliberately want to pay for a specific model.
 
 ### Verifying it's wired up
@@ -60,6 +68,18 @@ running, open the chat widget and ask a question. The API response's
 `"openrouter"`); `null` means both failed or neither is configured — check
 your server logs (`[ai] provider "..." failed, trying next: ...`) for the
 reason (never logged with the API key itself).
+
+For a direct, isolated check of each provider (rather than inferring it
+from one chat turn, which only tells you about whichever provider
+answered first), call the admin-only diagnostics route:
+
+```bash
+curl -H "x-admin-token: $ADMIN_TOKEN" http://localhost:3000/api/admin/ai-health
+```
+
+This sends one minimal request to every *configured* provider
+independently and reports `{configured, reachable, model, errorCategory}`
+for each — never a key or raw upstream error. See ARCHITECTURE.md §13.
 
 ## 3. Knowledge base
 

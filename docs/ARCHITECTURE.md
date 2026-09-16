@@ -114,16 +114,28 @@ AI Service (providers/index.ts) — ordered failover
   nothing else in the app changes.
 - `providers/gemini.ts` — calls Google's official Gemini REST API
   (`generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`)
-  directly via `fetch`. Model is `GEMINI_MODEL` (default `gemini-2.0-flash`,
-  a free-tier model at time of writing — **not hardcoded as a permanent
-  assumption**, see `.env.example`). A 20s timeout, non-2xx responses, and
-  empty/safety-blocked candidates all throw `AIProviderError` so the
-  service fails over rather than showing the student a raw error.
+  directly via `fetch`, authenticated via the `x-goog-api-key` header (the
+  current Gemini standard — not the legacy `?key=` query param, which
+  risks the key ending up in proxy/error logs). Model is `GEMINI_MODEL`
+  (default `gemini-2.5-flash`, a free-tier model as of Sept 2026 — **not
+  hardcoded as a permanent assumption**, see `.env.example`; the prior
+  default, `gemini-2.0-flash`, was shut down by Google on June 1, 2026,
+  which is exactly the kind of rename/retirement this design anticipates).
+  A 20s timeout, non-2xx responses, and empty/safety-blocked candidates
+  all throw `AIProviderError` (tagged with a coarse `category` — `auth`,
+  `rate_limit`, `timeout`, `server_error`, `empty_response`, `network` —
+  used by the health-check utility, see below) so the service fails over
+  rather than showing the student a raw error.
 - `providers/openrouter.ts` — calls OpenRouter's OpenAI-compatible
-  `/chat/completions` endpoint. Model is `OPENROUTER_MODEL` (default
-  `meta-llama/llama-3.3-70b-instruct:free`). **Cost guard:** the provider
-  refuses to call any model that doesn't end in `:free` unless
-  `OPENROUTER_ALLOW_PAID_MODEL=true` is explicitly set — a stale or
+  `/chat/completions` endpoint. Model is `OPENROUTER_MODEL`, defaulting to
+  `openrouter/free` — OpenRouter's own self-updating Free Models Router,
+  which resolves to whatever free-tier model is currently available
+  without manual upkeep (chosen after the previous pinned default,
+  `meta-llama/llama-3.3-70b-instruct:free`, was confirmed to have left
+  OpenRouter's free tier entirely in August 2026 — concrete evidence that
+  pinning one free model by name is fragile). **Cost guard:** the provider
+  refuses to call any model that isn't `openrouter/free` or `:free`-suffixed
+  unless `OPENROUTER_ALLOW_PAID_MODEL=true` is explicitly set — a stale or
   mistyped model id can never silently start incurring cost.
 - `providers/index.ts` (`generateAIResponse`) — tries each *configured*
   provider in order (Gemini, then OpenRouter), catching and logging (name +
@@ -131,6 +143,12 @@ AI Service (providers/index.ts) — ordered failover
   configured provider fails, or none are configured, it returns `null`
   rather than throwing — the caller is required to handle that by showing
   the safe fallback, never by guessing.
+- `health.ts` — a server-only utility (`checkProviderHealth()`) that
+  exercises each configured provider with a minimal request and reports
+  `{ configured, reachable, model, errorCategory }` per provider — never
+  a key, header, or raw error string. Used for operational verification
+  (e.g. "is Gemini actually reachable with these credentials right now"),
+  not wired to any public route — see §13.
 - `system-prompt.ts` — the dedicated Admissions Assistant system prompt
   (identity, source-of-truth discipline, no-hallucination rules, admissions
   language discipline, progressive lead collection, EN/AR auto-detect).
@@ -337,3 +355,30 @@ Application (src/app/apply — 7-step form → applications, documents tables)
       ↓
 Human registration (Stardom University admissions team makes the actual enrollment decision)
 ```
+
+## 13. Provider health-check utility
+
+`src/lib/ai/health.ts` (`checkProviderHealth()`) sends one minimal request
+("reply with the word OK") to each *configured* provider independently —
+unlike `generateAIResponse()`'s failover path, which stops at the first
+success and so never tells you whether the fallback provider is actually
+reachable on a day Gemini happens to work fine. For each provider it
+reports:
+
+```ts
+{ provider: "gemini" | "openrouter", configured: boolean, reachable?: boolean, model: string, errorCategory?: AIErrorCategory }
+```
+
+`AIErrorCategory` is one of `not_configured | auth | rate_limit | timeout |
+server_error | empty_response | network | config_rejected | unknown` —
+enough to diagnose a problem (expired key vs. rate limit vs. a retired
+model id) without ever including the key, an auth header, or the raw
+upstream response body.
+
+Exposed at `GET /api/admin/ai-health`, gated by the same `requireAdmin`
+shared-secret check as every other `/api/admin/*` route (§8) —
+deliberately not public, since polling it would burn free-tier request
+quota for no reason. This is the mechanism for answering "is Gemini/
+OpenRouter actually reachable with these credentials right now" once
+real API keys are configured; see the root-level report in this change
+for whether that was possible to confirm live in this build environment.

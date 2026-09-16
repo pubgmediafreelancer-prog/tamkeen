@@ -18,6 +18,22 @@ export interface AIGenerateParams {
 }
 
 /**
+ * Coarse failure category, used by the health-check utility
+ * (lib/ai/health.ts) to report *why* a provider failed without ever
+ * including the raw error text (which could echo back request details).
+ */
+export type AIErrorCategory =
+  | "not_configured"
+  | "auth"
+  | "rate_limit"
+  | "timeout"
+  | "server_error"
+  | "empty_response"
+  | "network"
+  | "config_rejected" // e.g. OpenRouter's non-":free" model guard
+  | "unknown";
+
+/**
  * Thrown by a provider on any failure that should trigger failover to the
  * next configured provider (rate limit, timeout, 5xx, malformed/empty
  * response). Providers should throw this rather than let raw fetch/SDK
@@ -27,7 +43,8 @@ export interface AIGenerateParams {
 export class AIProviderError extends Error {
   constructor(
     message: string,
-    public readonly provider: string
+    public readonly provider: string,
+    public readonly category: AIErrorCategory = "unknown"
   ) {
     super(message);
     this.name = "AIProviderError";
@@ -41,4 +58,6 @@ export interface AIProvider {
   isConfigured(): boolean;
   /** Returns the raw text completion. Throws AIProviderError on any failure. */
   generate(params: AIGenerateParams): Promise<string>;
+  /** The model id this provider will actually call (env var or default) — used by health.ts. */
+  resolvedModel(): string;
 }

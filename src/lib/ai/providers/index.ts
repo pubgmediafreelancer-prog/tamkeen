@@ -15,6 +15,11 @@ export { AIProviderError } from "./types";
  */
 const PROVIDERS: AIProvider[] = [new GeminiProvider(), new OpenRouterProvider()];
 
+/** Exposed read-only for the health-check utility (lib/ai/health.ts) — never mutate. */
+export function getProviders(): readonly AIProvider[] {
+  return PROVIDERS;
+}
+
 export function isAiConfigured(): boolean {
   return PROVIDERS.some((p) => p.isConfigured());
 }

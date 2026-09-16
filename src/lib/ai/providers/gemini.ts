@@ -7,14 +7,18 @@ import { AIGenerateParams, AIProvider, AIProviderError } from "./types";
  * dependency) so the app stays lightweight and never assumes a specific
  * SDK's billing/retry defaults.
  *
- * Free tier: as of this build, Gemini's free tier covers models like
- * `gemini-2.0-flash` / `gemini-flash-latest` at no cost within published
- * rate limits. Google renames/retires free-tier models over time, so the
- * model is NOT hardcoded — set GEMINI_MODEL to whatever is currently free
- * at https://ai.google.dev/gemini-api/docs/pricing. This code only ever
- * calls the exact model you configure; it never upgrades itself.
+ * Free tier: `gemini-2.5-flash` is the current (Sept 2026) free-tier
+ * default — verified against Gemini API release notes and third-party
+ * rate-limit trackers at the time of this change. `gemini-2.0-flash`
+ * (the previous default) was retired/shut down on June 1, 2026 and now
+ * returns errors, so it is no longer usable as a default. Free-tier
+ * models are renamed/retired by Google over time, so the model is NEVER
+ * hardcoded into the request logic — set GEMINI_MODEL to whatever is
+ * currently free at https://ai.google.dev/gemini-api/docs/pricing before
+ * relying on this default in production. This code only ever calls the
+ * exact model you configure; it never upgrades itself.
  */
-const DEFAULT_MODEL = "gemini-2.0-flash";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 const TIMEOUT_MS = 20_000;
 
 export class GeminiProvider implements AIProvider {
@@ -24,15 +28,15 @@ export class GeminiProvider implements AIProvider {
     return Boolean(process.env.GEMINI_API_KEY);
   }
 
-  private model(): string {
+  resolvedModel(): string {
     return process.env.GEMINI_MODEL || DEFAULT_MODEL;
   }
 
   async generate({ system, messages, maxTokens = 700 }: AIGenerateParams): Promise<string> {
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new AIProviderError("GEMINI_API_KEY is not set", this.name);
+    if (!apiKey) throw new AIProviderError("GEMINI_API_KEY is not set", this.name, "not_configured");
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model()}:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.resolvedModel()}:generateContent`;
 
     // Gemini uses "model" (not "assistant") for the assistant turn.
     const contents = messages.map((m) => ({
@@ -47,7 +51,13 @@ export class GeminiProvider implements AIProvider {
     try {
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // Header-based auth (current Gemini API standard) instead of the
+          // legacy `?key=` query param, so the key never ends up in a URL
+          // that some proxy/CDN/error-tracker might log verbatim.
+          "x-goog-api-key": apiKey,
+        },
         signal: controller.signal,
         body: JSON.stringify({
           system_instruction: { parts: [{ text: system }] },
@@ -57,16 +67,28 @@ export class GeminiProvider implements AIProvider {
       });
     } catch (err) {
       const isAbort = err instanceof Error && err.name === "AbortError";
-      throw new AIProviderError(isAbort ? "Gemini request timed out" : "Gemini request failed", this.name);
+      throw new AIProviderError(
+        isAbort ? "Gemini request timed out" : "Gemini request failed",
+        this.name,
+        isAbort ? "timeout" : "network"
+      );
     } finally {
       clearTimeout(timeout);
     }
 
     if (!res.ok) {
-      // 429 = rate limit, 5xx = server error, 400/403 = bad key/model config
-      // — all of these should fail over to the next provider rather than
-      // surface a raw error to the student.
-      throw new AIProviderError(`Gemini returned HTTP ${res.status}`, this.name);
+      // 401/403 = bad/missing key, 404 = bad model id, 429 = rate limit,
+      // 5xx = server error — all of these fail over to the next provider
+      // rather than surface a raw error to the student.
+      const category =
+        res.status === 401 || res.status === 403
+          ? "auth"
+          : res.status === 429
+            ? "rate_limit"
+            : res.status >= 500
+              ? "server_error"
+              : "unknown";
+      throw new AIProviderError(`Gemini returned HTTP ${res.status}`, this.name, category);
     }
 
     const json = await res.json().catch(() => null);
@@ -83,7 +105,8 @@ export class GeminiProvider implements AIProvider {
     if (!text) {
       throw new AIProviderError(
         `Gemini returned no usable text (finishReason: ${candidate?.finishReason ?? "unknown"})`,
-        this.name
+        this.name,
+        "empty_response"
       );
     }
 
