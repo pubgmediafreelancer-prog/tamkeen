@@ -2,11 +2,18 @@
   "mcpServers": {
     "stitch": {
       "command": "npx",
-      "args": ["-y", "stitch-mcp"],
+      "args": [
+        "-y",
+        "stitch-mcp"
+      ],
       "env": {
         "GOOGLE_CLOUD_PROJECT": "YOUR_PROJECT_ID",
         "GOOGLE_APPLICATION_CREDENTIALS": "./service-account.json"
       }
+    },
+    "supabase": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=budyvusezkzqapnrqriq&features=docs%2Caccount%2Cdatabase%2Cdebugging%2Cdevelopment%2Cfunctions%2Cbranching"
     }
   }
 }
