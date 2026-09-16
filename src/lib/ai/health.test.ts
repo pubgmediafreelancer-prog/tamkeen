@@ -5,7 +5,7 @@ const geminiMock = {
   name: "gemini",
   isConfigured: vi.fn(),
   generate: vi.fn(),
-  resolvedModel: vi.fn(() => "gemini-2.5-flash"),
+  resolvedModel: vi.fn(() => "gemini-3.6-flash"),
 };
 const openrouterMock = {
   name: "openrouter",
@@ -28,7 +28,7 @@ describe("checkProviderHealth — never exposes secrets", () => {
     const results = await checkProviderHealth();
 
     expect(results).toEqual([
-      { provider: "gemini", configured: false, model: "gemini-2.5-flash" },
+      { provider: "gemini", configured: false, model: "gemini-3.6-flash" },
       { provider: "openrouter", configured: false, model: "openrouter/free" },
     ]);
     expect(geminiMock.generate).not.toHaveBeenCalled();
@@ -43,7 +43,7 @@ describe("checkProviderHealth — never exposes secrets", () => {
     const results = await checkProviderHealth();
 
     const gemini = results.find((r) => r.provider === "gemini");
-    expect(gemini).toEqual({ provider: "gemini", configured: true, reachable: true, model: "gemini-2.5-flash" });
+    expect(gemini).toEqual({ provider: "gemini", configured: true, reachable: true, model: "gemini-3.6-flash" });
   });
 
   it("CONFIRMED BY LOCAL TEST: reports reachable=false with an error category, never the raw error/keys", async () => {

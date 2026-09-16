@@ -25,9 +25,23 @@ describe("GeminiProvider", () => {
     expect(provider.isConfigured()).toBe(true);
   });
 
-  it("defaults to the current (Sept 2026) free-tier model gemini-2.5-flash, not the retired gemini-2.0-flash", () => {
+  it("LIVE-VERIFIED: defaults to gemini-3.6-flash — confirmed by a real API call (Sept 2026) after gemini-2.5-flash returned a live HTTP 404 telling us to migrate to it", () => {
     vi.stubEnv("GEMINI_MODEL", "");
-    expect(provider.resolvedModel()).toBe("gemini-2.5-flash");
+    expect(provider.resolvedModel()).toBe("gemini-3.6-flash");
+  });
+
+  it("disables thinking (thinkingBudget: 0) so maxOutputTokens isn't consumed by an invisible reasoning trace — confirmed live to fix truncated/empty output", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }),
+    });
+
+    await provider.generate({ system: "sys", messages: [{ role: "user", content: "hi" }] });
+
+    const [, options] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(options.body as string);
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
   });
 
   it("throws a not_configured error without calling fetch when GEMINI_API_KEY is unset", async () => {
@@ -76,6 +90,17 @@ describe("GeminiProvider", () => {
       .catch((e) => e);
     expect(err).toBeInstanceOf(AIProviderError);
     expect(err.category).toBe("rate_limit");
+  });
+
+  it("LIVE-VERIFIED: categorizes a 404 as model_not_found — this is the exact response Google returns for a retired model id", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 404 });
+
+    const err: AIProviderError = await provider
+      .generate({ system: "sys", messages: [{ role: "user", content: "hi" }] })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(AIProviderError);
+    expect(err.category).toBe("model_not_found");
   });
 
   it("CONFIRMED BY LOCAL TEST: categorizes a 403 as auth and a 500 as server_error", async () => {

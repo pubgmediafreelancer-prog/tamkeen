@@ -36,9 +36,11 @@ to work, but configuring both gives you real failover.
 
 1. Get a free API key at https://aistudio.google.com/apikey.
 2. Set `GEMINI_API_KEY` in `.env.local`.
-3. `GEMINI_MODEL` defaults to `gemini-2.5-flash` if unset (current as of
-   Sept 2026 — `gemini-2.0-flash`, this project's original default, was
-   shut down June 1, 2026 and now errors). Check
+3. `GEMINI_MODEL` defaults to `gemini-3.6-flash` if unset — **live-verified**
+   with a real API call against a real key (Sept 2026). Two earlier
+   defaults are already dead: `gemini-2.0-flash` was shut down June 1,
+   2026, and `gemini-2.5-flash` now returns a live HTTP 404 telling you to
+   migrate to `gemini-3.6-flash`. Check
    https://ai.google.dev/gemini-api/docs/pricing for the current free-tier
    model list before going live — Google renames/retires these over time,
    and this app only ever calls exactly the model you configure.

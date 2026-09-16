@@ -31,6 +31,7 @@ export type AIErrorCategory =
   | "empty_response"
   | "network"
   | "config_rejected" // e.g. OpenRouter's non-":free" model guard
+  | "model_not_found" // e.g. Gemini 404 — the configured model id is retired/wrong
   | "unknown";
 
 /**

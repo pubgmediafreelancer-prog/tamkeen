@@ -37,6 +37,10 @@ describe("system prompt — no-hallucination / safety contract", () => {
     expect(BASE_SYSTEM_PROMPT.toLowerCase()).toContain("automatically");
   });
 
+  it("LIVE-VERIFIED FIX: instructs the university's own name to stay untransliterated in Arabic replies — a live Arabic test initially rendered 'Stardom' as a garbled Arabic transliteration until this rule was added", () => {
+    expect(BASE_SYSTEM_PROMPT).toContain("never transliterated into Arabic script");
+  });
+
   it("instructs progressive lead collection, not a front-loaded form", () => {
     expect(BASE_SYSTEM_PROMPT.toLowerCase()).toContain("progressively");
   });

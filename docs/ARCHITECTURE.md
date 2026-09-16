@@ -117,15 +117,26 @@ AI Service (providers/index.ts) — ordered failover
   directly via `fetch`, authenticated via the `x-goog-api-key` header (the
   current Gemini standard — not the legacy `?key=` query param, which
   risks the key ending up in proxy/error logs). Model is `GEMINI_MODEL`
-  (default `gemini-2.5-flash`, a free-tier model as of Sept 2026 — **not
-  hardcoded as a permanent assumption**, see `.env.example`; the prior
-  default, `gemini-2.0-flash`, was shut down by Google on June 1, 2026,
-  which is exactly the kind of rename/retirement this design anticipates).
-  A 20s timeout, non-2xx responses, and empty/safety-blocked candidates
-  all throw `AIProviderError` (tagged with a coarse `category` — `auth`,
-  `rate_limit`, `timeout`, `server_error`, `empty_response`, `network` —
-  used by the health-check utility, see below) so the service fails over
-  rather than showing the student a raw error.
+  (default `gemini-3.6-flash` — **live-verified** with a real key/request,
+  not just a web search: `gemini-2.5-flash` now returns a live HTTP 404,
+  `"This model ... is no longer available to new users. Please update your
+  code to use models/gemini-3.6-flash"`, and the default before that,
+  `gemini-2.0-flash`, was shut down by Google on June 1, 2026 — two
+  real-world confirmations of exactly the kind of rename/retirement this
+  design anticipates; the model is **never hardcoded as a permanent
+  assumption**, see `.env.example`). `generationConfig.thinkingConfig:
+  {thinkingBudget: 0}` is set explicitly — confirmed live that
+  `gemini-3.6-flash` otherwise spends part of `maxOutputTokens` on an
+  invisible reasoning trace before any visible text, which can silently
+  truncate a small token budget down to empty output; this app needs
+  deterministic tagged output, not open-ended reasoning, and disabling
+  thinking also avoids burning free-tier quota on invisible tokens. A 20s
+  timeout, non-2xx responses, and empty/safety-blocked candidates all
+  throw `AIProviderError` (tagged with a coarse `category` — `auth`,
+  `rate_limit`, `timeout`, `server_error`, `empty_response`, `network`,
+  `model_not_found` (Gemini's 404) — used by the health-check utility, see
+  below) so the service fails over rather than showing the student a raw
+  error.
 - `providers/openrouter.ts` — calls OpenRouter's OpenAI-compatible
   `/chat/completions` endpoint. Model is `OPENROUTER_MODEL`, defaulting to
   `openrouter/free` — OpenRouter's own self-updating Free Models Router,
@@ -382,3 +393,39 @@ quota for no reason. This is the mechanism for answering "is Gemini/
 OpenRouter actually reachable with these credentials right now" once
 real API keys are configured; see the root-level report in this change
 for whether that was possible to confirm live in this build environment.
+
+## 14. Live verification log (Sept 2026)
+
+A real `GEMINI_API_KEY` was configured in `.env.local` (never committed)
+and exercised end-to-end. Findings that changed the code, in the order
+they were discovered:
+
+1. **`gemini-2.5-flash` → live HTTP 404.** Google's own error message named
+   the replacement (`gemini-3.6-flash`) directly — stronger evidence than
+   any web search, since it came from the API itself using this project's
+   real key. Default changed accordingly (§5).
+2. **`gemini-3.6-flash` truncated output under a small token budget.** A
+   32-token budget came back as `finishReason: MAX_TOKENS` with empty
+   text; `usageMetadata.thoughtsTokenCount` showed the model spending
+   tokens on an invisible reasoning trace first. Setting
+   `generationConfig.thinkingConfig.thinkingBudget = 0` fixed it
+   completely — confirmed with an exact-match response on retry.
+3. **Arabic replies transliterated "Stardom" into Arabic script**, garbling
+   the university's name (e.g. rendering it as something unrelated) while
+   getting every fact right (tuition, program, scholarship). Not a
+   hallucination of the "never invent tuition/programs/requirements" kind,
+   but a real fidelity bug. Fixed by extending the existing "keep program
+   names in English" prompt rule to explicitly cover the university's own
+   name; confirmed fixed on a live retry.
+4. **Intermittent Gemini `503`s and one timeout occurred organically**
+   during testing (not staged) — in every case `generateChatTurn()`
+   returned the exact `PROVIDER_UNAVAILABLE_FALLBACK` string with
+   `providerFailure: true` and made exactly one fetch call (no retry loop,
+   no second provider call beyond what was configured) — real-world
+   confirmation of the failover design in §11, not just the mocked tests.
+
+What was and wasn't live-tested (OpenRouter had no key configured in this
+session, so only Gemini's live behavior and the safe-fallback path were
+observed; failing over *to* OpenRouter remains verified by mocked tests
+only) is detailed in this change's final report rather than duplicated
+here, since that's a point-in-time record rather than a living design doc.

@@ -7,18 +7,21 @@ import { AIGenerateParams, AIProvider, AIProviderError } from "./types";
  * dependency) so the app stays lightweight and never assumes a specific
  * SDK's billing/retry defaults.
  *
- * Free tier: `gemini-2.5-flash` is the current (Sept 2026) free-tier
- * default — verified against Gemini API release notes and third-party
- * rate-limit trackers at the time of this change. `gemini-2.0-flash`
- * (the previous default) was retired/shut down on June 1, 2026 and now
- * returns errors, so it is no longer usable as a default. Free-tier
- * models are renamed/retired by Google over time, so the model is NEVER
- * hardcoded into the request logic — set GEMINI_MODEL to whatever is
- * currently free at https://ai.google.dev/gemini-api/docs/pricing before
- * relying on this default in production. This code only ever calls the
- * exact model you configure; it never upgrades itself.
+ * Free tier: `gemini-3.6-flash` is the current default, confirmed by a
+ * LIVE call against the real Gemini API with a real key (Sept 2026) — the
+ * previous default, `gemini-2.5-flash`, now returns HTTP 404 with the
+ * message "This model ... is no longer available to new users. Please
+ * update your code to use models/gemini-3.6-flash", which is itself
+ * confirmation of exactly the kind of rename/retirement this design
+ * anticipates (and `gemini-2.0-flash`, the original default before that,
+ * was shut down entirely on June 1, 2026). Free-tier models are
+ * renamed/retired by Google over time, so the model is NEVER hardcoded
+ * into the request logic — set GEMINI_MODEL to whatever is currently free
+ * at https://ai.google.dev/gemini-api/docs/pricing before relying on this
+ * default in production. This code only ever calls the exact model you
+ * configure; it never upgrades itself.
  */
-const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL = "gemini-3.6-flash";
 const TIMEOUT_MS = 20_000;
 
 export class GeminiProvider implements AIProvider {
@@ -62,7 +65,20 @@ export class GeminiProvider implements AIProvider {
         body: JSON.stringify({
           system_instruction: { parts: [{ text: system }] },
           contents,
-          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.4 },
+          generationConfig: {
+            maxOutputTokens: maxTokens,
+            temperature: 0.4,
+            // gemini-3.6-flash "thinks" by default, spending part of
+            // maxOutputTokens on an invisible reasoning trace before any
+            // visible text — confirmed live to consume most/all of a
+            // small budget and truncate output entirely (finishReason
+            // MAX_TOKENS with empty text). This app needs deterministic,
+            // tagged (<reply>/<profile_update>) output, not open-ended
+            // reasoning, so thinking is disabled outright — verified live
+            // to fix truncation and avoid burning free-tier quota on
+            // invisible tokens.
+            thinkingConfig: { thinkingBudget: 0 },
+          },
         }),
       });
     } catch (err) {
@@ -77,17 +93,21 @@ export class GeminiProvider implements AIProvider {
     }
 
     if (!res.ok) {
-      // 401/403 = bad/missing key, 404 = bad model id, 429 = rate limit,
-      // 5xx = server error — all of these fail over to the next provider
-      // rather than surface a raw error to the student.
+      // 401/403 = bad/missing key, 404 = retired/unknown model id (Google
+      // returns this — confirmed live — when GEMINI_MODEL names a model
+      // no longer available to this key, e.g. a retired free-tier model),
+      // 429 = rate limit, 5xx = server error — all of these fail over to
+      // the next provider rather than surface a raw error to the student.
       const category =
         res.status === 401 || res.status === 403
           ? "auth"
-          : res.status === 429
-            ? "rate_limit"
-            : res.status >= 500
-              ? "server_error"
-              : "unknown";
+          : res.status === 404
+            ? "model_not_found"
+            : res.status === 429
+              ? "rate_limit"
+              : res.status >= 500
+                ? "server_error"
+                : "unknown";
       throw new AIProviderError(`Gemini returned HTTP ${res.status}`, this.name, category);
     }
 
