@@ -1,6 +1,6 @@
 import "server-only";
-import Anthropic from "@anthropic-ai/sdk";
-import { BASE_SYSTEM_PROMPT, buildContextBlock } from "./system-prompt";
+import { generateAIResponse, isAiConfigured, configuredProviderNames } from "./providers";
+import { BASE_SYSTEM_PROMPT, buildContextBlock, PROVIDER_UNAVAILABLE_FALLBACK } from "./system-prompt";
 import { KnowledgeBaseRow, ProgramRow, StudentProfile } from "@/lib/types";
 
 export interface ChatTurn {
@@ -8,80 +8,73 @@ export interface ChatTurn {
   content: string;
 }
 
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (client) return client;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set. The AI Admission Agent cannot respond without it — see .env.example."
-    );
+export { isAiConfigured, configuredProviderNames };
+
+export interface ChatTurnResult {
+  reply: string;
+  extracted: Partial<StudentProfile>;
+  /** Provider that produced this reply, or null if every provider failed. */
+  provider: string | null;
+  /** True when both/all configured providers failed and we returned the safe fallback. */
+  providerFailure: boolean;
+}
+
+/**
+ * Parses the model's required <reply>/<profile_update> tagged output.
+ * Deliberately tolerant of a model that doesn't follow the format
+ * perfectly (small free-tier models sometimes drift) — the student must
+ * never see raw JSON or an empty message because of a formatting slip.
+ */
+function parseTaggedResponse(raw: string): { reply: string; extracted: Partial<StudentProfile> } {
+  const replyMatch = raw.match(/<reply>([\s\S]*?)<\/reply>/i);
+  const profileMatch = raw.match(/<profile_update>([\s\S]*?)<\/profile_update>/i);
+
+  let reply = replyMatch ? replyMatch[1].trim() : raw.replace(/<profile_update>[\s\S]*?<\/profile_update>/gi, "").trim();
+  reply = reply.replace(/<\/?reply>/gi, "").trim();
+  if (!reply) reply = raw.trim();
+
+  let extracted: Partial<StudentProfile> = {};
+  if (profileMatch) {
+    try {
+      const parsed = JSON.parse(profileMatch[1].trim());
+      if (parsed && typeof parsed === "object") extracted = parsed;
+    } catch {
+      extracted = {};
+    }
   }
-  client = new Anthropic({ apiKey });
-  return client;
+  return { reply, extracted };
 }
 
-export function isAiConfigured() {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
-}
-
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
-
-export async function generateReply(
+/**
+ * Single provider-agnostic call per chat turn: generates the student-facing
+ * reply AND extracts new profile facts in one round trip (see the
+ * OUTPUT FORMAT section of BASE_SYSTEM_PROMPT) — deliberately avoiding a
+ * second AI call, since free-tier rate limits are the binding constraint
+ * for this MVP (see docs/ARCHITECTURE.md "Cost protection").
+ *
+ * Never fabricates an answer: if every configured provider fails, returns
+ * PROVIDER_UNAVAILABLE_FALLBACK with providerFailure=true so the caller can
+ * force a human-follow-up flag on the lead.
+ */
+export async function generateChatTurn(
   history: ChatTurn[],
   knowledge: KnowledgeBaseRow[],
   programs: ProgramRow[],
   profile: StudentProfile
-): Promise<string> {
-  const anthropic = getClient();
+): Promise<ChatTurnResult> {
   const contextBlock = buildContextBlock(knowledge, programs, profile);
+  const system = `${BASE_SYSTEM_PROMPT}\n\n${contextBlock}`;
 
-  const response = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 700,
-    system: `${BASE_SYSTEM_PROMPT}\n\n${contextBlock}`,
-    messages: history.map((h) => ({ role: h.role, content: h.content })),
+  const result = await generateAIResponse({
+    system,
+    messages: history,
+    maxTokens: 900,
   });
 
-  const textBlock = response.content.find((b) => b.type === "text");
-  return textBlock && "text" in textBlock ? textBlock.text : "";
-}
-
-const EXTRACTION_SYSTEM = `You extract structured facts a student has stated about themselves from an admissions chat, for CRM purposes.
-Return ONLY a compact JSON object (no prose, no markdown fences) with any of these keys the student has stated or clearly implied, IN THE LATEST MESSAGE OR ANYWHERE EARLIER IN THE CONVERSATION IF NOT ALREADY CAPTURED:
-first_name, last_name, nationality, country_of_residence, education_level, certificate_type, percentage, graduation_year, desired_level (BACHELOR|MASTER|DOCTORATE|HIGHER_DIPLOMA), desired_faculty, desired_program, intended_start, phone, email, preferred_language (en|ar), wants_to_apply (boolean), wants_human (boolean).
-Omit any key you cannot confidently fill. If nothing new, return {}.`;
-
-export async function extractProfileUpdates(
-  history: ChatTurn[],
-  currentProfile: StudentProfile
-): Promise<Partial<StudentProfile>> {
-  try {
-    const anthropic = getClient();
-    const transcript = history
-      .slice(-10)
-      .map((h) => `${h.role.toUpperCase()}: ${h.content}`)
-      .join("\n");
-
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 300,
-      system: EXTRACTION_SYSTEM,
-      messages: [
-        {
-          role: "user",
-          content: `Known profile so far: ${JSON.stringify(currentProfile)}\n\nConversation:\n${transcript}\n\nJSON:`,
-        },
-      ],
-    });
-
-    const textBlock = response.content.find((b) => b.type === "text");
-    const raw = textBlock && "text" in textBlock ? textBlock.text : "{}";
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return {};
-    return JSON.parse(jsonMatch[0]);
-  } catch {
-    // Extraction is best-effort — never let it break the chat turn.
-    return {};
+  if (!result) {
+    return { reply: PROVIDER_UNAVAILABLE_FALLBACK, extracted: {}, provider: null, providerFailure: true };
   }
+
+  const { reply, extracted } = parseTaggedResponse(result.text);
+  return { reply, extracted, provider: result.provider, providerFailure: false };
 }

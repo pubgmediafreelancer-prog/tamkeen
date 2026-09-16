@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/server";
 import { retrieveKnowledge, retrievePrograms } from "@/lib/ai/retrieval";
-import { generateReply, extractProfileUpdates, isAiConfigured, ChatTurn } from "@/lib/ai/chat";
+import { generateChatTurn, isAiConfigured, ChatTurn } from "@/lib/ai/chat";
 import { scoreLead, requiresHumanFollowup } from "@/lib/leads/scoring";
 import { notifyN8n } from "@/lib/n8n/notify";
 import { StudentProfile } from "@/lib/types";
@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "ANTHROPIC_API_KEY is not configured. The AI Admission Agent cannot generate responses without it (see .env.example).",
+          "No AI provider is configured. Set GEMINI_API_KEY (primary, free tier) and/or OPENROUTER_API_KEY (fallback, free tier) — see .env.example.",
       },
       { status: 500 }
     );
@@ -113,15 +113,19 @@ export async function POST(req: NextRequest) {
 
   const currentProfile = profileFromLead(existingLead);
 
-  // 4. Generate the assistant reply grounded in verified context only.
-  const reply = await generateReply(history, knowledge, programs, currentProfile);
-
-  // 5. Best-effort structured extraction of new profile facts.
-  const extracted = await extractProfileUpdates(history, currentProfile);
+  // 4. Generate the assistant reply grounded in verified context only, and
+  // extract new profile facts, in a single provider call (see
+  // generateChatTurn — two calls would double free-tier API usage).
+  // Tries Gemini first, then OpenRouter; never fabricates an answer if
+  // both fail (see PROVIDER_UNAVAILABLE_FALLBACK).
+  const turn = await generateChatTurn(history, knowledge, programs, currentProfile);
+  const { reply, extracted, providerFailure } = turn;
   const mergedProfile: StudentProfile = { ...currentProfile, ...extracted };
 
   const leadScore = scoreLead(mergedProfile);
-  const followup = requiresHumanFollowup(mergedProfile, message);
+  const followup = providerFailure
+    ? { required: true, reason: "AI providers were unavailable for this turn — needs manual follow-up." }
+    : requiresHumanFollowup(mergedProfile, message);
 
   const wasHot = existingLead?.lead_score === "HOT";
   const isNowHot = leadScore === "HOT";
@@ -183,6 +187,7 @@ export async function POST(req: NextRequest) {
       lead_id: savedLead?.id,
       role: "assistant",
       message: reply,
+      intent: providerFailure ? "provider_unavailable" : turn.provider,
       sources_used: sourcesUsed,
     },
   ]);
@@ -205,5 +210,6 @@ export async function POST(req: NextRequest) {
     leadScore,
     humanFollowupRequired: followup.required,
     humanFollowupReason: followup.reason ?? null,
+    provider: turn.provider, // "gemini" | "openrouter" | null — never a raw key/secret
   });
 }

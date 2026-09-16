@@ -1,5 +1,11 @@
 # Architecture — Stardom University AI Admission Assistant
 
+> **Revision note:** the AI layer originally shipped on Anthropic Claude.
+> It has since been replaced end-to-end with a provider-agnostic layer
+> running on Google Gemini (free tier, primary) with OpenRouter (free tier,
+> fallback) for a $0 MVP cost baseline — see §5 and §11. No Anthropic
+> dependency remains anywhere in the codebase.
+
 ## 1. Current architecture (before this work)
 
 The repository was empty except for `.mcp.json` (a Stitch MCP server config).
@@ -12,15 +18,20 @@ build.
 **Stack:** Next.js 16 (App Router, TypeScript, Tailwind CSS v4) as a single
 full-stack app — server components + API routes — deployed to any Node
 host (Vercel, etc.). Supabase (Postgres + Storage + Auth) as the database
-and file store. Anthropic Claude as the AI layer. n8n as the automation
-layer. This matches the brief's "don't overengineer" instruction: one app,
-one database, no microservices, no separate agent framework.
+and file store. A provider-agnostic AI layer — **Google Gemini (free tier)
+as primary, OpenRouter (free tier) as fallback** — powers the Admission
+Agent at $0 base cost. n8n as the automation layer. This matches the
+brief's "don't overengineer" instruction: one app, one database, no
+microservices, no separate agent framework.
 
 ```
 Traffic → Landing page (Next.js, SSR)
         → AI Chat widget (client) → /api/chat (server)
                                     → retrieval (Supabase: knowledge_base + programs)
-                                    → Claude (system prompt + verified context)
+                                    → AI Service (provider-agnostic)
+                                        → Gemini (free tier, primary)
+                                        → OpenRouter (free tier, fallback)
+                                        → safe human-advisor fallback (never fabricates)
                                     → lead upsert + conversation log (Supabase)
                                     → n8n webhook (lead_created / hot_lead)
         → /apply (multi-step form) → /api/applications, /api/documents
@@ -34,8 +45,13 @@ Traffic → Landing page (Next.js, SSR)
 - **Framework:** Next.js 16 App Router, TypeScript, Tailwind v4.
 - **Database:** Supabase Postgres (see `supabase/migrations/0001_init.sql`).
 - **Storage:** Supabase Storage, private bucket `student-documents`.
-- **AI:** Anthropic Claude via `@anthropic-ai/sdk` (model configurable via
-  `ANTHROPIC_MODEL`, defaults to `claude-sonnet-5`).
+- **AI:** Provider-agnostic (`src/lib/ai/providers/`) — **Gemini** (primary,
+  free tier, model configurable via `GEMINI_MODEL`) with **OpenRouter**
+  (fallback, free tier, model configurable via `OPENROUTER_MODEL`) as
+  failover. No AI vendor SDK is used — both call the vendor's REST API
+  directly via `fetch`, so there's no SDK-imposed billing/retry behavior
+  and no dependency to swap when a provider changes. **Anthropic/Claude has
+  been fully removed** — see §5 and §10.
 - **Automation:** n8n via outbound webhooks (this app never depends on n8n
   to function — every webhook call is a fire-and-forget no-op if the URL
   env var is unset).
@@ -74,34 +90,83 @@ Full schema in `supabase/migrations/0001_init.sql`:
 
 ## 5. AI layer
 
+**Provider-agnostic by design** — the rest of the app never imports a
+vendor SDK or calls a vendor endpoint directly. Everything goes through
+one abstraction:
+
+```
+Admission Agent (chat.ts)
+      ↓
+AI Service (providers/index.ts) — ordered failover
+      ↓
+  ┌───────────┐      fails →   ┌──────────────┐    fails →  return null
+  │  Gemini   │  ───────────►  │  OpenRouter  │  ─────────► (caller shows
+  │ (primary) │                │  (fallback)  │             safe fallback)
+  └───────────┘                └──────────────┘
+```
+
 `src/lib/ai/`:
 
+- `providers/types.ts` — the `AIProvider` interface (`isConfigured()`,
+  `generate({system, messages, maxTokens})`) and `AIProviderError`. Adding a
+  new vendor later (e.g. a paid provider, a local model) means implementing
+  this interface and appending it to the list in `providers/index.ts` —
+  nothing else in the app changes.
+- `providers/gemini.ts` — calls Google's official Gemini REST API
+  (`generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`)
+  directly via `fetch`. Model is `GEMINI_MODEL` (default `gemini-2.0-flash`,
+  a free-tier model at time of writing — **not hardcoded as a permanent
+  assumption**, see `.env.example`). A 20s timeout, non-2xx responses, and
+  empty/safety-blocked candidates all throw `AIProviderError` so the
+  service fails over rather than showing the student a raw error.
+- `providers/openrouter.ts` — calls OpenRouter's OpenAI-compatible
+  `/chat/completions` endpoint. Model is `OPENROUTER_MODEL` (default
+  `meta-llama/llama-3.3-70b-instruct:free`). **Cost guard:** the provider
+  refuses to call any model that doesn't end in `:free` unless
+  `OPENROUTER_ALLOW_PAID_MODEL=true` is explicitly set — a stale or
+  mistyped model id can never silently start incurring cost.
+- `providers/index.ts` (`generateAIResponse`) — tries each *configured*
+  provider in order (Gemini, then OpenRouter), catching and logging (name +
+  reason only — never a key) any failure and moving to the next. If every
+  configured provider fails, or none are configured, it returns `null`
+  rather than throwing — the caller is required to handle that by showing
+  the safe fallback, never by guessing.
 - `system-prompt.ts` — the dedicated Admissions Assistant system prompt
   (identity, source-of-truth discipline, no-hallucination rules, admissions
   language discipline, progressive lead collection, EN/AR auto-detect).
   `buildContextBlock()` renders retrieved knowledge + program rows +
   known student profile into the prompt — this is the **only** factual
   input the model receives; it is instructed never to answer from memory.
+  Also exports `NO_INFO_FALLBACK` (the exact required sentence for
+  "not in the knowledge base") and `PROVIDER_UNAVAILABLE_FALLBACK` (shown
+  when every AI provider is down — written by application code, never by a
+  model).
 - `retrieval.ts` — retrieves `knowledge_base` rows via Postgres full-text
   search (ILIKE fallback), and `programs` rows via structured filtering
   (degree-level + subject keyword detection) rather than fuzzy matching,
   since tuition/duration/requirements must come from exact records.
   `match_knowledge_base()` (pgvector cosine search) is defined in the
   migration and ready to use once an embeddings pipeline populates
-  `knowledge_base.embedding` — not required for the MVP.
-- `chat.ts` — two Claude calls per turn: (1) the conversational reply
-  grounded in the context block, (2) a best-effort structured-extraction
-  call that pulls new profile facts (name, nationality, desired program,
-  contact info, "wants to apply", "wants human") as JSON, merged into the
-  lead record. Extraction failures never break the chat turn.
+  `knowledge_base.embedding` — not required for the MVP. **Unchanged by
+  the provider swap** — retrieval is provider-independent by construction.
+- `chat.ts` (`generateChatTurn`) — **one** AI call per turn (not two): the
+  system prompt requires the model to answer inside a `<reply>` tag and
+  emit any newly-learned profile facts as JSON inside a `<profile_update>`
+  tag in the same response. `parseTaggedResponse()` extracts both,
+  tolerating a model that doesn't follow the format perfectly (falls back
+  to using the raw text as the reply, and `{}` for extraction, so the
+  student is never shown broken output). This halves API usage against the
+  two-call design used with Claude — see §15 "Cost protection", since
+  free-tier rate limits are the binding constraint now, not per-token cost.
 
 **Hallucination guardrails:** the system prompt explicitly lists every
-"never invent" category from the brief, mandates the exact fallback
-sentence when information isn't in the verified context, and forbids
-definitive admission-decision language. This is enforced by prompt design
-today; a stronger enforcement (e.g., citation-checking a claim against
-`sources_used` before sending) is a natural next step once real traffic is
-flowing.
+"never invent" category from the brief, mandates the exact `NO_INFO_FALLBACK`
+sentence (word-for-word) when information isn't in the verified context,
+and forbids definitive admission-decision language. This is enforced by
+prompt design and is provider-independent — the same rules apply whether
+Gemini or OpenRouter answers. A stronger enforcement (e.g., citation-checking
+a claim against `sources_used` before sending) is a natural next step once
+real traffic is flowing.
 
 ## 6. Knowledge base
 
@@ -175,8 +240,8 @@ credentials configured in this environment — see §10):
 
 ## 10. Required credentials (not available in this build environment)
 
-This environment has **no** Supabase project, Anthropic API key, or n8n
-instance configured, and outbound network access to
+This environment has **no** Supabase project, Gemini/OpenRouter API key, or
+n8n instance configured, and outbound network access to
 `stardomuniversity.edu.eu` is blocked for direct fetches (site content was
 gathered via the Firecrawl search tool instead — see §6). The app is fully
 built and will run correctly once these are supplied:
@@ -185,11 +250,90 @@ built and will run correctly once these are supplied:
 |---|---|
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Server-side DB/Storage access |
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public read-only fallback |
-| `ANTHROPIC_API_KEY` | Powers the AI Admission Agent — chat returns a clear 500 error naming this variable if unset |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Primary AI provider (free tier) |
+| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Fallback AI provider (free tier) |
 | `N8N_WEBHOOK_URL_LEAD_CREATED`, `N8N_WEBHOOK_URL_HOT_LEAD`, `N8N_WEBHOOK_URL_APPLICATION_EVENT` | Automation layer (optional — no-ops if unset) |
 | `ADMIN_TOKEN` | Admin dashboard access |
 
+At least one of `GEMINI_API_KEY` / `OPENROUTER_API_KEY` must be set for the
+chat to function at all; the chat API returns a clear 500 naming the exact
+missing variable if neither is set, rather than failing silently.
+
 Because none of these are present in this container, the app has been
-verified with `npm run build` (production build + typecheck passes) but
-**not** exercised end-to-end against a live database or live model — that
-verification should happen as soon as credentials are supplied.
+verified with `npm run build` (production build + typecheck passes),
+`npm run lint` (clean), and `npm test` (provider-failover logic tested with
+mocked `fetch` — see §11) but **not** exercised end-to-end against a live
+database or a live Gemini/OpenRouter account — that verification should
+happen as soon as credentials are supplied. Live-credential claims are
+called out explicitly as such wherever they appear in this repo; anything
+not marked "confirmed by live test" was verified by code/unit test only.
+
+## 11. Cost protection & provider failover (design contract)
+
+This MVP is designed so it **cannot** incur unexpected AI cost:
+
+1. Only `GEMINI_MODEL` / `OPENROUTER_MODEL` — both configurable, both
+   defaulting to a free-tier model — are ever called. No code path
+   upgrades or substitutes a different (potentially paid) model on
+   failure; failover only ever switches *provider*, never silently
+   switches to a paid *model* within a provider.
+2. `OpenRouterProvider` hard-refuses to call a non-`:free` model unless
+   `OPENROUTER_ALLOW_PAID_MODEL=true` is explicitly set — see §5.
+3. One AI call per chat turn (reply + profile extraction combined via the
+   `<reply>`/`<profile_update>` tagged output format), not two — see §5,
+   `chat.ts`.
+4. Retrieval sends only the top ~6 matching `knowledge_base` rows and ~5
+   matching `programs` rows per turn (see `retrieval.ts` `limit`
+   parameters) — never the whole site or the whole table.
+5. Conversation history sent to the model is capped at the last 30 turns
+   (`api/chat/route.ts`, `.limit(30)` on the Supabase query).
+6. Failure handling never retries in a loop: each provider is tried
+   exactly once per turn, then the service moves on or gives up — no
+   exponential backoff that could multiply request volume against a
+   rate-limited free tier.
+
+Failover behavior, exactly as implemented in `providers/index.ts`:
+
+```
+generateAIResponse(params)
+  for provider in [Gemini, OpenRouter]:
+    if not provider.isConfigured(): skip
+    try: return provider.generate(params)   // success — stop here
+    catch: log "<provider> failed, trying next" (no secrets), continue
+  return null   // every configured provider failed, or none configured
+```
+
+`generateChatTurn()` (`chat.ts`) turns a `null` result into
+`PROVIDER_UNAVAILABLE_FALLBACK` — a fixed, human-advisor-pointing sentence
+written by application code, never generated by a model — and
+`api/chat/route.ts` forces `human_followup_required = true` on the lead in
+that case, so a real person is guaranteed to pick up the thread even when
+both AI providers are down.
+
+## 12. End-to-end funnel
+
+```
+Stardom Official Website (stardomuniversity.edu.eu)
+      ↓  (scripts/ingest-stardom.ts / npm run seed)
+Knowledge Base (Supabase: knowledge_base, programs — source_url + last_verified on every row)
+      ↓  (src/lib/ai/retrieval.ts)
+Retrieval (full-text search + structured program filters, top ~6/~5 rows)
+      ↓  (src/lib/ai/chat.ts → providers/index.ts)
+Gemini Free Tier (primary)
+      ↓ on failure
+OpenRouter Free (fallback)
+      ↓ on failure
+Safe human-advisor fallback (never fabricated)
+      ↓
+AI Admission Agent (src/app/api/chat/route.ts)
+      ↓
+Lead (Supabase: leads, conversations — progressive capture + HOT/WARM/COLD scoring)
+      ↓
+Supabase (source of record for leads, applications, documents, events)
+      ↓
+n8n (lead_created / hot_lead / application_event webhooks — notifications, follow-ups, CRM sync)
+      ↓
+Application (src/app/apply — 7-step form → applications, documents tables)
+      ↓
+Human registration (Stardom University admissions team makes the actual enrollment decision)
+```

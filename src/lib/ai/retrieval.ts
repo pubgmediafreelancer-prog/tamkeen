@@ -26,7 +26,8 @@ const DEGREE_KEYWORDS: Record<string, string> = {
   diploma: "HIGHER_DIPLOMA",
 };
 
-function detectDegreeLevel(message: string): string | null {
+/** Exported for unit testing — see retrieval.test.ts. */
+export function detectDegreeLevel(message: string): string | null {
   const lower = message.toLowerCase();
   for (const [kw, level] of Object.entries(DEGREE_KEYWORDS)) {
     if (lower.includes(kw)) return level;
@@ -34,7 +35,8 @@ function detectDegreeLevel(message: string): string | null {
   return null;
 }
 
-function extractSearchTerms(message: string): string[] {
+/** Exported for unit testing — see retrieval.test.ts. */
+export function extractSearchTerms(message: string): string[] {
   const lower = message.toLowerCase();
   const terms: string[] = [];
   for (const [canonical, synonyms] of Object.entries(PROGRAM_KEYWORDS)) {
