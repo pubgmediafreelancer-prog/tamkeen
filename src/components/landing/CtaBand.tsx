@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { agentWhatsAppLink } from "@/lib/contact";
 
 export function CtaBand() {
   return (
@@ -16,7 +17,9 @@ export function CtaBand() {
             Start Your Application
           </Link>
           <a
-            href="mailto:admission@stardomuniversity.edu.eu"
+            href={agentWhatsAppLink("Hi, I'm interested in studying at Stardom University.")}
+            target="_blank"
+            rel="noopener noreferrer"
             className="rounded-full border border-(--color-paper)/25 px-6 py-3.5 text-sm font-medium transition-colors hover:bg-white/5"
           >
             Talk to a Human Advisor

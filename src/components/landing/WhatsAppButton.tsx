@@ -1,5 +1,4 @@
-const WHATSAPP_NUMBER = "905537045811";
-const PREFILLED_MESSAGE = "Hi, I'm interested in studying at Stardom University.";
+import { AGENT_NAME, agentWhatsAppLink } from "@/lib/contact";
 
 /**
  * Direct contact with Stardom University's authorized admissions agent —
@@ -8,11 +7,11 @@ const PREFILLED_MESSAGE = "Hi, I'm interested in studying at Stardom University.
 export function WhatsAppButton() {
   return (
     <a
-      href={`https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(PREFILLED_MESSAGE)}`}
+      href={agentWhatsAppLink("Hi, I'm interested in studying at Stardom University.")}
       target="_blank"
       rel="noopener noreferrer"
-      aria-label="Contact an admissions advisor on WhatsApp"
-      title="Contact an admissions advisor on WhatsApp"
+      aria-label={`Contact ${AGENT_NAME}, Stardom University's authorized admissions agent, on WhatsApp`}
+      title={`Contact ${AGENT_NAME} — Authorized Admissions Agent — on WhatsApp`}
       className="fixed bottom-5 left-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-(--shadow-lg) transition-transform hover:scale-105"
     >
       <svg viewBox="0 0 32 32" className="h-7 w-7" fill="currentColor" aria-hidden="true">

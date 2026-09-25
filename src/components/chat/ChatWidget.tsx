@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getSessionId, getAttribution } from "@/lib/utils/session";
 import { track } from "@/lib/utils/track";
+import { AGENT_WHATSAPP_DISPLAY, agentWhatsAppLink } from "@/lib/contact";
 
 interface Message {
   id: string;
@@ -66,7 +67,7 @@ export function ChatWidget({ open, onClose, embedded = false }: { open: boolean;
             role: "assistant",
             content:
               err.error ??
-              "I'm having trouble connecting right now. Please try again in a moment, or reach admissions directly at admission@stardomuniversity.edu.eu.",
+              `I'm having trouble connecting right now. Please try again in a moment, or reach an admissions advisor directly on WhatsApp at ${AGENT_WHATSAPP_DISPLAY}.`,
           },
         ]);
         return;
@@ -157,9 +158,9 @@ export function ChatWidget({ open, onClose, embedded = false }: { open: boolean;
           <div className="rounded-xl border border-(--color-gold)/40 bg-(--color-gold)/10 px-4 py-3 text-xs text-(--color-ink)">
             <p className="font-medium">This may need a human advisor.</p>
             <p className="mt-0.5 text-(--color-ink)/70">
-              I&apos;ve flagged this for the admissions team. You can also email{" "}
-              <a className="underline" href="mailto:admission@stardomuniversity.edu.eu">
-                admission@stardomuniversity.edu.eu
+              I&apos;ve flagged this for the admissions team. You can also message{" "}
+              <a className="underline" href={agentWhatsAppLink("Hi, I need help with my admission.")} target="_blank" rel="noopener noreferrer">
+                WhatsApp
               </a>{" "}
               or continue chatting here.
             </p>
