@@ -45,9 +45,24 @@ export function extractSearchTerms(message: string): string[] {
   return terms;
 }
 
+const CORE_CATEGORIES = ["UNIVERSITY", "ADMISSIONS", "APPLICATION", "TUITION"];
+
 /**
  * Retrieves relevant knowledge_base rows for a user message.
- * Strategy: Postgres full-text search on content, with an ILIKE fallback.
+ * Strategy: Postgres full-text search on content, with an ILIKE fallback,
+ * UNCONDITIONALLY merged with a baseline set of core university-overview
+ * entries (study mode, faculties, admissions, application, tuition).
+ *
+ * The baseline is fetched every time — not only when the keyword searches
+ * return nothing — because keyword matching against English-language
+ * source content is inherently unreliable for broad questions ("what
+ * programs do you have?") or non-English phrasing, and a PostgREST-level
+ * query failure on the keyword step (malformed filter, tsquery edge case)
+ * would otherwise silently leave the AI with zero context and force an
+ * unnecessary NO_INFO_FALLBACK. Merging is cheap (few rows, deduped by id)
+ * and guarantees the assistant always has basic verified facts to work
+ * from, on top of whatever specific keyword matches it also finds.
+ *
  * Prefer semantic (pgvector) search automatically once embeddings are
  * populated — see match_knowledge_base() in the schema — by wiring an
  * embeddings call here when EMBEDDINGS_API_KEY is configured.
@@ -64,53 +79,44 @@ export async function retrieveKnowledge(
     .filter((w) => w.length > 2)
     .slice(0, 8);
 
-  if (words.length === 0) {
-    const { data } = await supabase
+  const keywordMatches: KnowledgeBaseRow[] = [];
+
+  if (words.length > 0) {
+    const tsQuery = words.join(" | ");
+    const { data: ftsData, error: ftsError } = await supabase
       .from("knowledge_base")
       .select("*")
       .eq("status", "active")
+      .textSearch("content", tsQuery, { type: "websearch", config: "english" })
       .limit(limit);
-    return (data ?? []) as KnowledgeBaseRow[];
+    if (!ftsError && ftsData) keywordMatches.push(...(ftsData as KnowledgeBaseRow[]));
+
+    if (keywordMatches.length === 0) {
+      const orFilter = words.map((w) => `content.ilike.%${w}%,title.ilike.%${w}%`).join(",");
+      const { data: likeData, error: likeError } = await supabase
+        .from("knowledge_base")
+        .select("*")
+        .eq("status", "active")
+        .or(orFilter)
+        .limit(limit);
+      if (!likeError && likeData) keywordMatches.push(...(likeData as KnowledgeBaseRow[]));
+    }
   }
 
-  const tsQuery = words.join(" | ");
-  const { data: ftsData, error: ftsError } = await supabase
+  const { data: coreData, error: coreError } = await supabase
     .from("knowledge_base")
     .select("*")
     .eq("status", "active")
-    .textSearch("content", tsQuery, { type: "websearch", config: "english" })
+    .in("category", CORE_CATEGORIES)
     .limit(limit);
+  if (coreError) console.error("retrieveKnowledge: core baseline query failed:", coreError.message);
 
-  if (!ftsError && ftsData && ftsData.length > 0) {
-    return ftsData as KnowledgeBaseRow[];
+  const merged = new Map<string, KnowledgeBaseRow>();
+  for (const row of [...keywordMatches, ...((coreData ?? []) as KnowledgeBaseRow[])]) {
+    merged.set(row.id, row);
   }
 
-  const orFilter = words.map((w) => `content.ilike.%${w}%,title.ilike.%${w}%`).join(",");
-  const { data: likeData } = await supabase
-    .from("knowledge_base")
-    .select("*")
-    .eq("status", "active")
-    .or(orFilter)
-    .limit(limit);
-
-  if (likeData && likeData.length > 0) {
-    return likeData as KnowledgeBaseRow[];
-  }
-
-  // Keyword search found nothing — common for broad/general questions
-  // ("what's your study mode?") or non-English phrasing that doesn't
-  // literally overlap with the (English-language) source content. Rather
-  // than leave the AI with zero context and force a NO_INFO_FALLBACK on a
-  // question that has a real, general answer, fall back to the core
-  // university-overview categories so basic facts are always available.
-  const { data: coreData } = await supabase
-    .from("knowledge_base")
-    .select("*")
-    .eq("status", "active")
-    .in("category", ["UNIVERSITY", "ADMISSIONS", "APPLICATION", "TUITION"])
-    .limit(limit);
-
-  return (coreData ?? []) as KnowledgeBaseRow[];
+  return Array.from(merged.values()).slice(0, limit);
 }
 
 /**
