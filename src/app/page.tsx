@@ -6,6 +6,7 @@ import { Faq } from "@/components/landing/Faq";
 import { CtaBand } from "@/components/landing/CtaBand";
 import { Footer } from "@/components/landing/Footer";
 import { ChatLauncher } from "@/components/chat/ChatLauncher";
+import { WhatsAppButton } from "@/components/landing/WhatsAppButton";
 import { isSupabaseConfigured, getSupabaseAdmin } from "@/lib/supabase/server";
 import { ProgramRow } from "@/lib/types";
 
@@ -37,6 +38,7 @@ export default async function Home() {
       </main>
       <Footer />
       <ChatLauncher />
+      <WhatsAppButton />
     </>
   );
 }
