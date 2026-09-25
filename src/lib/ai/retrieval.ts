@@ -93,7 +93,24 @@ export async function retrieveKnowledge(
     .or(orFilter)
     .limit(limit);
 
-  return (likeData ?? []) as KnowledgeBaseRow[];
+  if (likeData && likeData.length > 0) {
+    return likeData as KnowledgeBaseRow[];
+  }
+
+  // Keyword search found nothing — common for broad/general questions
+  // ("what's your study mode?") or non-English phrasing that doesn't
+  // literally overlap with the (English-language) source content. Rather
+  // than leave the AI with zero context and force a NO_INFO_FALLBACK on a
+  // question that has a real, general answer, fall back to the core
+  // university-overview categories so basic facts are always available.
+  const { data: coreData } = await supabase
+    .from("knowledge_base")
+    .select("*")
+    .eq("status", "active")
+    .in("category", ["UNIVERSITY", "ADMISSIONS", "APPLICATION", "TUITION"])
+    .limit(limit);
+
+  return (coreData ?? []) as KnowledgeBaseRow[];
 }
 
 /**
